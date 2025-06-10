@@ -1,51 +1,209 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, createContext, useContext, useReducer } from 'react';
 import * as Papa from 'papaparse';
 
 interface DataRow {
-    number: number;
-    mod3: number;
-    mod4: number;
-    mod5: number;
-    mod6: number;
+    [key: string]: number;
 }
 
 interface Filters {
-    mod3: number[];
-    mod4: number[];
-    mod5: number[];
-    mod6: number[];
+    [key: string]: number[];
 }
 
-const App: React.FC = () => {
-    const [data, setData] = useState<DataRow[]>([]);
+interface SearchTerms {
+    [key: string]: string;
+}
 
-    const [filters, setFilters] = useState<Filters>({
-        mod3: [],
-        mod4: [],
-        mod5: [],
-        mod6: []
-    });
+interface DropdownState {
+    [key: string]: boolean;
+}
 
-    const [searchTerms, setSearchTerms] = useState({
-        mod3: '',
-        mod4: '',
-        mod5: '',
-        mod6: ''
-    });
+interface AppState {
+    data: DataRow[];
+    filters: Filters;
+    searchTerms: SearchTerms;
+    dropdownOpen: DropdownState;
+    currentPage: number;
+    scrollIndex: number;
+    columns: string[];
+}
 
-    const [dropdownOpen, setDropdownOpen] = useState({
-        mod3: false,
-        mod4: false,
-        mod5: false,
-        mod6: false
-    });
-    const [currentPage, setCurrentPage] = useState(1);
-    const [scrollIndex, setScrollIndex] = useState(0);
+type AppAction =
+    | { type: 'SET_DATA'; payload: { data: DataRow[]; columns: string[] } }
+    | { type: 'SET_FILTER'; payload: { filterType: string; values: number[] } }
+    | { type: 'SET_SEARCH_TERM'; payload: { filterType: string; value: string } }
+    | { type: 'TOGGLE_DROPDOWN'; payload: string }
+    | { type: 'SET_CURRENT_PAGE'; payload: number }
+    | { type: 'SET_SCROLL_INDEX'; payload: number }
+    | { type: 'RESET_PAGINATION' };
 
+const initialState: AppState = {
+    data: [],
+    filters: {},
+    searchTerms: {},
+    dropdownOpen: {},
+    currentPage: 1,
+    scrollIndex: 0,
+    columns: []
+};
+
+const appReducer = (state: AppState, action: AppAction): AppState => {
+    switch (action.type) {
+        case 'SET_DATA':
+            // Initialize filters and search terms for new columns
+            const newFilters: Filters = {};
+            const newSearchTerms: SearchTerms = {};
+            const newDropdownOpen: DropdownState = {};
+            
+            // Fix: Check if columns exists and is an array before calling forEach
+            const columns = action.payload.columns || [];
+            columns.forEach(col => {
+                newFilters[col] = [];
+                newSearchTerms[col] = '';
+                newDropdownOpen[col] = false;
+            });
+            
+            return { 
+                ...state, 
+                data: action.payload.data || [],
+                columns: columns,
+                filters: newFilters,
+                searchTerms: newSearchTerms,
+                dropdownOpen: newDropdownOpen,
+                currentPage: 1,
+                scrollIndex: 0
+            };
+        case 'SET_FILTER':
+            return {
+                ...state,
+                filters: {
+                    ...state.filters,
+                    [action.payload.filterType]: action.payload.values
+                }
+            };
+        case 'SET_SEARCH_TERM':
+            return {
+                ...state,
+                searchTerms: {
+                    ...state.searchTerms,
+                    [action.payload.filterType]: action.payload.value
+                }
+            };
+        case 'TOGGLE_DROPDOWN':
+            return {
+                ...state,
+                dropdownOpen: {
+                    ...state.dropdownOpen,
+                    [action.payload]: !state.dropdownOpen[action.payload]
+                }
+            };
+        case 'SET_CURRENT_PAGE':
+            return { ...state, currentPage: action.payload };
+        case 'SET_SCROLL_INDEX':
+            return { ...state, scrollIndex: action.payload };
+        case 'RESET_PAGINATION':
+            return { ...state, currentPage: 1, scrollIndex: 0 };
+        default:
+            return state;
+    }
+};
+
+interface AppContextType {
+    state: AppState;
+    dispatch: React.Dispatch<AppAction>;
+    filteredData: DataRow[];
+    paginatedData: DataRow[];
+    visibleData: DataRow[];
+    totalPages: number;
+    maxScrollIndex: number;
+    getAvailableValuesForFilter: (targetColumn: string) => number[];
+    getFilteredValues: (column: string, searchTerm: string) => number[];
+}
+
+const AppContext = createContext<AppContextType | undefined>(undefined);
+
+const useAppContext = () => {
+    const context = useContext(AppContext);
+    if (context === undefined) {
+        throw new Error('useAppContext must be used within an AppProvider');
+    }
+    return context;
+};
+
+const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    const [state, dispatch] = useReducer(appReducer, initialState);
     const rowsPerPage = 100;
     const visibleRows = 20;
 
-    // Handle file upload
+    // Get available values for a specific filter based on other active filters
+    const getAvailableValuesForFilter = (targetColumn: string) => {
+        const otherFilters = { ...state.filters };
+        delete otherFilters[targetColumn];
+        
+        const filteredData = state.data.filter(row => {
+            return Object.keys(otherFilters).every(key => {
+                const filterValues = otherFilters[key];
+                return !filterValues || filterValues.length === 0 || filterValues.includes(row[key]);
+            });
+        });
+
+        const uniqueValues = [...new Set(filteredData.map(row => row[targetColumn]))].sort((a, b) => a - b);
+        return uniqueValues;
+    };
+
+    // Filter data
+    const filteredData = useMemo(() => {
+        return state.data.filter(row => {
+            return Object.keys(state.filters).every(key => {
+                const filterValues = state.filters[key];
+                return !filterValues || filterValues.length === 0 || filterValues.includes(row[key]);
+            });
+        });
+    }, [state.data, state.filters]);
+
+    // Paginate data
+    const paginatedData = useMemo(() => {
+        const startIndex = (state.currentPage - 1) * rowsPerPage;
+        const endIndex = startIndex + rowsPerPage;
+        return filteredData.slice(startIndex, endIndex);
+    }, [filteredData, state.currentPage]);
+
+    // Get visible rows for scrolling
+    const visibleData = useMemo(() => {
+        return paginatedData.slice(state.scrollIndex, state.scrollIndex + visibleRows);
+    }, [paginatedData, state.scrollIndex]);
+
+    const totalPages = Math.ceil(filteredData.length / rowsPerPage);
+    const maxScrollIndex = Math.max(0, paginatedData.length - visibleRows);
+
+    const getFilteredValues = (column: string, searchTerm: string) => {
+        const availableValues = getAvailableValuesForFilter(column);
+        return availableValues.filter(val => 
+            val.toString().toLowerCase().includes(searchTerm.toLowerCase())
+        );
+    };
+
+    const value: AppContextType = {
+        state,
+        dispatch,
+        filteredData,
+        paginatedData,
+        visibleData,
+        totalPages,
+        maxScrollIndex,
+        getAvailableValuesForFilter,
+        getFilteredValues
+    };
+
+    return (
+        <AppContext.Provider value={value}>
+            {children}
+        </AppContext.Provider>
+    );
+};
+
+const FileUpload: React.FC = () => {
+    const { state, dispatch } = useAppContext();
+
     const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
         if (file) {
@@ -59,15 +217,20 @@ const App: React.FC = () => {
                         skipEmptyLines: true
                     });
 
-                    if (parsed.data) {
-                        const processedData: DataRow[] = parsed.data.map((row) => ({
-                            number: parseInt(row.number) || 0,
-                            mod3: parseInt(row.mod3) || 0,
-                            mod4: parseInt(row.mod4) || 0,
-                            mod5: parseInt(row.mod5) || 0,
-                            mod6: parseInt(row.mod6) || 0
-                        }));
-                        setData(processedData);
+                    if (parsed.data && parsed.data.length > 0) {
+                        // Get column names from the first row
+                        const firstRow = parsed.data[0] as any;
+                        const columns = Object.keys(firstRow);
+                        
+                        const processedData: DataRow[] = parsed.data.map((row: any) => {
+                            const processedRow: DataRow = {};
+                            columns.forEach(col => {
+                                processedRow[col] = parseInt(row[col]) || 0;
+                            });
+                            return processedRow;
+                        });
+                        
+                        dispatch({ type: 'SET_DATA', payload: { data: processedData, columns } });
                     }
                 } catch (error) {
                     console.error('Error parsing CSV:', error);
@@ -77,9 +240,261 @@ const App: React.FC = () => {
         }
     };
 
+    return (
+        <div style={{ marginBottom: '20px', padding: '10px', border: '1px solid #ccc', backgroundColor: '#f9f9f9' }}>
+            <h3>Load CSV File</h3>
+            <input
+                type="file"
+                accept=".csv"
+                onChange={handleFileUpload}
+                style={{ marginBottom: '10px' }}
+            />
+            <div style={{ fontSize: '14px', color: '#666' }}>
+                Upload your CSV file with numeric columns
+            </div>
+            <div style={{ fontSize: '14px', color: '#666', marginTop: '5px' }}>
+                Current dataset has {state.data.length} rows
+            </div>
+        </div>
+    );
+};
+
+const FilterDropdown: React.FC<{ column: string }> = ({ column }) => {
+    const { state, dispatch, getFilteredValues } = useAppContext();
+
+    const handleMultiSelectChange = (value: number) => {
+        const currentValues = state.filters[column] || [];
+        const newValues = currentValues.includes(value)
+            ? currentValues.filter(v => v !== value)
+            : [...currentValues, value];
+
+        dispatch({ type: 'SET_FILTER', payload: { filterType: column, values: newValues } });
+        dispatch({ type: 'RESET_PAGINATION' });
+    };
+
+    const handleSearchChange = (value: string) => {
+        dispatch({ type: 'SET_SEARCH_TERM', payload: { filterType: column, value } });
+    };
+
+    const toggleDropdown = () => {
+        dispatch({ type: 'TOGGLE_DROPDOWN', payload: column });
+    };
+
+    return (
+        <div style={{ position: 'relative', minWidth: '200px' }}>
+            <label>{column} dropdown: </label>
+            <div style={{ position: 'relative' }}>
+                <div 
+                    onClick={toggleDropdown}
+                    style={{ 
+                        border: '1px solid #ccc', 
+                        padding: '8px', 
+                        cursor: 'pointer',
+                        backgroundColor: 'white',
+                        minHeight: '20px'
+                    }}
+                >
+                    {(state.filters[column] || []).length === 0 
+                        ? 'Select values...' 
+                        : `${(state.filters[column] || []).length} selected`
+                    }
+                </div>
+
+                {state.dropdownOpen[column] && (
+                    <div style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        right: 0,
+                        backgroundColor: 'white',
+                        border: '1px solid #ccc',
+                        borderTop: 'none',
+                        maxHeight: '200px',
+                        zIndex: 1000,
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                    }}>
+                        <input
+                            type="text"
+                            placeholder={`Search ${column}...`}
+                            value={state.searchTerms[column] || ''}
+                            onChange={(e) => handleSearchChange(e.target.value)}
+                            style={{
+                                width: '100%',
+                                padding: '8px',
+                                border: 'none',
+                                borderBottom: '1px solid #eee',
+                                boxSizing: 'border-box'
+                            }}
+                        />
+
+                        <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
+                            {getFilteredValues(column, state.searchTerms[column] || '').map(value => (
+                                <div
+                                    key={value}
+                                    onClick={() => handleMultiSelectChange(value)}
+                                    style={{
+                                        padding: '8px',
+                                        cursor: 'pointer',
+                                        backgroundColor: (state.filters[column] || []).includes(value) ? '#e6f3ff' : 'white',
+                                        borderBottom: '1px solid #f0f0f0'
+                                    }}
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={(state.filters[column] || []).includes(value)}
+                                        onChange={() => {}}
+                                        style={{ marginRight: '8px' }}
+                                    />
+                                    {value}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+const Filters: React.FC = () => {
+    const { state } = useAppContext();
+    
+    return (
+        <div style={{ marginBottom: '20px', padding: '10px', border: '1px solid #ccc' }}>
+            <h3>Filters</h3>
+            <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                {state.columns.map(column => (
+                    <FilterDropdown key={column} column={column} />
+                ))}
+            </div>
+            <div style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
+                Green - selected, White - unselected
+            </div>
+        </div>
+    );
+};
+
+const DataTable: React.FC = () => {
+    const { state, dispatch, filteredData, paginatedData, visibleData, totalPages, maxScrollIndex } = useAppContext();
+
+    const handleScroll = (direction: 'up' | 'down') => {
+        if (direction === 'up' && state.scrollIndex > 0) {
+            dispatch({ type: 'SET_SCROLL_INDEX', payload: state.scrollIndex - 1 });
+        } else if (direction === 'down' && state.scrollIndex < maxScrollIndex) {
+            dispatch({ type: 'SET_SCROLL_INDEX', payload: state.scrollIndex + 1 });
+        }
+    };
+
+    const handlePageChange = (direction: 'prev' | 'next') => {
+        if (direction === 'prev' && state.currentPage > 1) {
+            dispatch({ type: 'SET_CURRENT_PAGE', payload: state.currentPage - 1 });
+        } else if (direction === 'next' && state.currentPage < totalPages) {
+            dispatch({ type: 'SET_CURRENT_PAGE', payload: state.currentPage + 1 });
+        }
+    };
+
+    return (
+        <div style={{ marginBottom: '20px' }}>
+            <div style={{ marginBottom: '10px' }}>
+                <span>Total Records: {filteredData.length}</span>
+                <span style={{ marginLeft: '20px' }}>
+                    Showing {state.scrollIndex + 1}-{Math.min(state.scrollIndex + 20, paginatedData.length)} of {paginatedData.length} (Page {state.currentPage} of {totalPages})
+                </span>
+            </div>
+
+            <div style={{ border: '1px solid #ccc', marginBottom: '10px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                        <tr style={{ backgroundColor: '#f0f0f0' }}>
+                            {state.columns.map(column => (
+                                <th key={column} style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>
+                                    {column}
+                                </th>
+                            ))}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {visibleData.map((row, index) => (
+                            <tr key={state.scrollIndex + index}>
+                                {state.columns.map(column => (
+                                    <td key={column} style={{ border: '1px solid #ccc', padding: '8px' }}>
+                                        {row[column]}
+                                    </td>
+                                ))}
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            {/* Scroll Controls */}
+            <div style={{ marginBottom: '10px' }}>
+                <button 
+                    onClick={() => handleScroll('up')} 
+                    disabled={state.scrollIndex === 0}
+                    style={{ marginRight: '10px', padding: '5px 10px' }}
+                >
+                    Scroll Up
+                </button>
+                <button 
+                    onClick={() => handleScroll('down')} 
+                    disabled={state.scrollIndex >= maxScrollIndex}
+                    style={{ padding: '5px 10px' }}
+                >
+                    Scroll Down
+                </button>
+                <span style={{ marginLeft: '20px' }}>
+                    Scroll Position: {state.scrollIndex + 1} - {Math.min(state.scrollIndex + 20, paginatedData.length)}
+                </span>
+            </div>
+
+            {/* Pagination Controls */}
+            <div>
+                <button 
+                    onClick={() => handlePageChange('prev')} 
+                    disabled={state.currentPage === 1}
+                    style={{ marginRight: '10px', padding: '5px 10px' }}
+                >
+                    Previous Page
+                </button>
+                <span style={{ margin: '0 10px' }}>
+                    Page {state.currentPage} of {totalPages}
+                </span>
+                <button 
+                    onClick={() => handlePageChange('next')} 
+                    disabled={state.currentPage === totalPages}
+                    style={{ marginLeft: '10px', padding: '5px 10px' }}
+                >
+                    Next Page
+                </button>
+            </div>
+        </div>
+    );
+};
+
+const FilterSummary: React.FC = () => {
+    const { state } = useAppContext();
+    const hasActiveFilters = Object.values(state.filters).some(filterArray => filterArray && filterArray.length > 0);
+
+    if (!hasActiveFilters) return null;
+
+    return (
+        <div style={{ padding: '10px', backgroundColor: '#f9f9f9', border: '1px solid #ddd' }}>
+            <h4>Active Filters:</h4>
+            {Object.entries(state.filters).map(([column, values]) => (
+                values && values.length > 0 && (
+                    <div key={column}>{column}: {values.join(', ')}</div>
+                )
+            ))}
+        </div>
+    );
+};
+
+const Dashboard: React.FC = () => {
+    const { dispatch } = useAppContext();
+
     // Load default data
     useEffect(() => {
-        // Default sample data
         const sampleData: DataRow[] = [
             { number: 12, mod3: 0, mod4: 0, mod5: 2, mod6: 0 },
             { number: 24, mod3: 0, mod4: 0, mod5: 4, mod6: 0 },
@@ -93,293 +508,26 @@ const App: React.FC = () => {
             { number: 23, mod3: 2, mod4: 3, mod5: 3, mod6: 5 },
             { number: 5664, mod3: 0, mod4: 0, mod5: 4, mod6: 0 }
         ];
-        setData(sampleData);
-    }, []);
-
-    // Get available values for a specific filter based on other active filters
-    const getAvailableValuesForFilter = (targetColumn: keyof Filters) => {
-        // Create a filter object excluding the target column
-        const otherFilters = { ...filters };
-        delete otherFilters[targetColumn];
-        
-        // Filter data based on other active filters
-        const filteredData = data.filter(row => {
-            if (otherFilters.mod3 && otherFilters.mod3.length > 0 && !otherFilters.mod3.includes(row.mod3)) return false;
-            if (otherFilters.mod4 && otherFilters.mod4.length > 0 && !otherFilters.mod4.includes(row.mod4)) return false;
-            if (otherFilters.mod5 && otherFilters.mod5.length > 0 && !otherFilters.mod5.includes(row.mod5)) return false;
-            if (otherFilters.mod6 && otherFilters.mod6.length > 0 && !otherFilters.mod6.includes(row.mod6)) return false;
-            return true;
-        });
-
-        // Get unique values for the target column from the filtered data
-        const uniqueValues = [...new Set(filteredData.map(row => row[targetColumn]))].sort((a, b) => a - b);
-        return uniqueValues;
-    };
-
-    // Filter data
-    const filteredData = useMemo(() => {
-        return data.filter(row => {
-            if (filters.mod3.length > 0 && !filters.mod3.includes(row.mod3)) return false;
-            if (filters.mod4.length > 0 && !filters.mod4.includes(row.mod4)) return false;
-            if (filters.mod5.length > 0 && !filters.mod5.includes(row.mod5)) return false;
-            if (filters.mod6.length > 0 && !filters.mod6.includes(row.mod6)) return false;
-            return true;
-        });
-    }, [data, filters]);
-
-    // Paginate data
-    const paginatedData = useMemo(() => {
-        const startIndex = (currentPage - 1) * rowsPerPage;
-        const endIndex = startIndex + rowsPerPage;
-        return filteredData.slice(startIndex, endIndex);
-    }, [filteredData, currentPage]);
-
-    // Get visible rows for scrolling
-    const visibleData = useMemo(() => {
-        return paginatedData.slice(scrollIndex, scrollIndex + visibleRows);
-    }, [paginatedData, scrollIndex]);
-
-    const totalPages = Math.ceil(filteredData.length / rowsPerPage);
-    const maxScrollIndex = Math.max(0, paginatedData.length - visibleRows);
-
-    const handleMultiSelectChange = (filterType: keyof Filters, value: number) => {
-        setFilters(prev => {
-            const currentValues = prev[filterType];
-            const newValues = currentValues.includes(value)
-                ? currentValues.filter(v => v !== value)
-                : [...currentValues, value];
-
-                return {
-                    ...prev,
-                    [filterType]: newValues
-                };
-        });
-        setCurrentPage(1);
-        setScrollIndex(0);
-    };
-
-    const handleSearchChange = (filterType: keyof typeof searchTerms, value: string) => {
-        setSearchTerms(prev => ({
-            ...prev,
-            [filterType]: value
-        }));
-    };
-
-    const toggleDropdown = (filterType: keyof typeof dropdownOpen) => {
-        setDropdownOpen(prev => ({
-            ...prev,
-            [filterType]: !prev[filterType]
-        }));
-    };
-
-    const getFilteredValues = (column: keyof DataRow, searchTerm: string) => {
-        const availableValues = getAvailableValuesForFilter(column);
-        return availableValues.filter(val => 
-            val.toString().toLowerCase().includes(searchTerm.toLowerCase())
-        );
-    };
-
-    const handleScroll = (direction: 'up' | 'down') => {
-        if (direction === 'up' && scrollIndex > 0) {
-            setScrollIndex(scrollIndex - 1);
-        } else if (direction === 'down' && scrollIndex < maxScrollIndex) {
-            setScrollIndex(scrollIndex + 1);
-        }
-    };
+        const columns = ['number', 'mod3', 'mod4', 'mod5', 'mod6'];
+        dispatch({ type: 'SET_DATA', payload: { data: sampleData, columns } });
+    }, [dispatch]);
 
     return (
         <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif' }}>
-        <h1>Business Intelligence Dashboard</h1>
+            <h1>Business Intelligence Dashboard</h1>
+            <FileUpload />
+            <Filters />
+            <DataTable />
+            <FilterSummary />
+        </div>
+    );
+};
 
-        {/* File Upload Section */}
-        <div style={{ marginBottom: '20px', padding: '10px', border: '1px solid #ccc', backgroundColor: '#f9f9f9' }}>
-            <h3>Load CSV File</h3>
-            <input
-                type="file"
-                accept=".csv"
-                onChange={handleFileUpload}
-                style={{ marginBottom: '10px' }}
-            />
-            <div style={{ fontSize: '14px', color: '#666' }}>
-                Upload your CSV file with columns: number, mod3, mod4, mod5, mod6
-            </div>
-            <div style={{ fontSize: '14px', color: '#666', marginTop: '5px' }}>
-                Current dataset has {data.length} rows
-            </div>
-        </div>
-
-        {/* Filters Section */}
-        <div style={{ marginBottom: '20px', padding: '10px', border: '1px solid #ccc' }}>
-        <h3>Filters</h3>
-        <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        {(['mod3', 'mod4', 'mod5', 'mod6'] as const).map(column => (
-            <div key={column} style={{ position: 'relative', minWidth: '200px' }}>
-            <label>{column} dropdown: </label>
-            <div style={{ position: 'relative' }}>
-            <div 
-            onClick={() => toggleDropdown(column)}
-            style={{ 
-                border: '1px solid #ccc', 
-                padding: '8px', 
-                cursor: 'pointer',
-                backgroundColor: 'white',
-                minHeight: '20px'
-            }}
-            >
-            {filters[column].length === 0 
-                ? 'Select values...' 
-                : `${filters[column].length} selected`
-            }
-            </div>
-
-            {dropdownOpen[column] && (
-                <div style={{
-                    position: 'absolute',
-                    top: '100%',
-                    left: 0,
-                    right: 0,
-                    backgroundColor: 'white',
-                    border: '1px solid #ccc',
-                    borderTop: 'none',
-                    maxHeight: '200px',
-                    zIndex: 1000,
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
-                }}>
-                <input
-                type="text"
-                placeholder={`Search ${column}...`}
-                value={searchTerms[column]}
-                onChange={(e) => handleSearchChange(column, e.target.value)}
-                style={{
-                    width: '100%',
-                    padding: '8px',
-                    border: 'none',
-                    borderBottom: '1px solid #eee',
-                    boxSizing: 'border-box'
-                }}
-                />
-
-                <div style={{ maxHeight: '150px', overflowY: 'auto' }}>
-                {getFilteredValues(column, searchTerms[column]).map(value => (
-                    <div
-                    key={value}
-                    onClick={() => handleMultiSelectChange(column, value)}
-                    style={{
-                        padding: '8px',
-                        cursor: 'pointer',
-                        backgroundColor: filters[column].includes(value) ? '#e6f3ff' : 'white',
-                        borderBottom: '1px solid #f0f0f0'
-                    }}
-                    >
-                    <input
-                    type="checkbox"
-                    checked={filters[column].includes(value)}
-                    onChange={() => {}}
-                    style={{ marginRight: '8px' }}
-                    />
-                    {value}
-                    </div>
-                ))}
-                </div>
-                </div>
-            )}
-            </div>
-            </div>
-        ))}
-        </div>
-
-        <div style={{ marginTop: '10px', fontSize: '14px', color: '#666' }}>
-        Green - selected, White - unselected
-        </div>
-        </div>
-        {/* Data Table */}
-        <div style={{ marginBottom: '20px' }}>
-        <div style={{ marginBottom: '10px' }}>
-        <span>Total Records: {filteredData.length}</span>
-        <span style={{ marginLeft: '20px' }}>
-        Showing {scrollIndex + 1}-{Math.min(scrollIndex + visibleRows, paginatedData.length)} of {paginatedData.length} (Page {currentPage} of {totalPages})
-        </span>
-        </div>
-
-        <div style={{ border: '1px solid #ccc', marginBottom: '10px' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-        <tr style={{ backgroundColor: '#f0f0f0' }}>
-        <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>number</th>
-        <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>mod3</th>
-        <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>mod4</th>
-        <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>mod5</th>
-        <th style={{ border: '1px solid #ccc', padding: '8px', textAlign: 'left' }}>mod6</th>
-        </tr>
-        </thead>
-        <tbody>
-        {visibleData.map((row, index) => (
-            <tr key={scrollIndex + index}>
-            <td style={{ border: '1px solid #ccc', padding: '8px' }}>{row.number}</td>
-            <td style={{ border: '1px solid #ccc', padding: '8px' }}>{row.mod3}</td>
-            <td style={{ border: '1px solid #ccc', padding: '8px' }}>{row.mod4}</td>
-            <td style={{ border: '1px solid #ccc', padding: '8px' }}>{row.mod5}</td>
-            <td style={{ border: '1px solid #ccc', padding: '8px' }}>{row.mod6}</td>
-            </tr>
-        ))}
-        </tbody>
-        </table>
-        </div>
-
-        {/* Scroll Controls */}
-        <div style={{ marginBottom: '10px' }}>
-        <button 
-        onClick={() => handleScroll('up')} 
-        disabled={scrollIndex === 0}
-        style={{ marginRight: '10px', padding: '5px 10px' }}
-        >
-        Scroll Up
-        </button>
-        <button 
-        onClick={() => handleScroll('down')} 
-        disabled={scrollIndex >= maxScrollIndex}
-        style={{ padding: '5px 10px' }}
-        >
-        Scroll Down
-        </button>
-        <span style={{ marginLeft: '20px' }}>
-        Scroll Position: {scrollIndex + 1} - {Math.min(scrollIndex + visibleRows, paginatedData.length)}
-        </span>
-        </div>
-
-        {/* Pagination Controls */}
-        <div>
-        <button 
-        onClick={() => setCurrentPage(Math.max(1, currentPage - 1))} 
-        disabled={currentPage === 1}
-        style={{ marginRight: '10px', padding: '5px 10px' }}
-        >
-        Previous Page
-        </button>
-        <span style={{ margin: '0 10px' }}>
-        Page {currentPage} of {totalPages}
-        </span>
-        <button 
-        onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))} 
-        disabled={currentPage === totalPages}
-        style={{ marginLeft: '10px', padding: '5px 10px' }}
-        >
-        Next Page
-        </button>
-        </div>
-        </div>
-
-        {/* Filter Summary */}
-        {(filters.mod3.length > 0 || filters.mod4.length > 0 || filters.mod5.length > 0 || filters.mod6.length > 0) && (
-            <div style={{ padding: '10px', backgroundColor: '#f9f9f9', border: '1px solid #ddd' }}>
-            <h4>Active Filters:</h4>
-            {filters.mod3.length > 0 && <div>mod3: {filters.mod3.join(', ')}</div>}
-            {filters.mod4.length > 0 && <div>mod4: {filters.mod4.join(', ')}</div>}
-            {filters.mod5.length > 0 && <div>mod5: {filters.mod5.join(', ')}</div>}
-            {filters.mod6.length > 0 && <div>mod6: {filters.mod6.join(', ')}</div>}
-            </div>
-        )}
-        </div>
+const App: React.FC = () => {
+    return (
+        <AppProvider>
+            <Dashboard />
+        </AppProvider>
     );
 };
 
